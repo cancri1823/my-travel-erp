@@ -115,7 +115,7 @@ with tab_ins:
                     st.rerun()
 
 # ==========================================
-# 2. 交通銜接 
+# 2. 交通銜接 (已新增公司名稱與來回選項)
 # ==========================================
 with tab_flight:
     st.header("✈️ 航班與交通銜接")
@@ -123,6 +123,14 @@ with tab_flight:
     t_type = c1.selectbox("種類", ["飛機", "高鐵", "火車", "客運", "其他"])
     t_start = c2.text_input("起點")
     t_end = c3.text_input("訖點")
+    
+    # 新增公司名稱與來回打勾選項的列
+    c_comp, c_rt = st.columns([3, 1])
+    t_company = c_comp.text_input("營運公司名稱", placeholder="例如：長榮航空、台灣高鐵、南海電鐵", key="t_comp")
+    with c_rt:
+        st.write("") # 加入空格協助按鈕對齊
+        st.write("")
+        t_is_roundtrip = st.checkbox("🔄 這是來回票", key="t_rt")
     
     c_dep1, c_dep2, c_arr1, c_arr2 = st.columns(4)
     t_dep_d = c_dep1.date_input("出發日期")
@@ -146,14 +154,19 @@ with tab_flight:
         if t_start and t_amt >= 0:
             if 'trans_records' not in st.session_state: st.session_state.trans_records = []
             st.session_state.trans_records.append({
-                "種類": t_type, "起點": t_start, "訖點": t_end,
+                "種類": t_type, "公司": t_company, "來回": t_is_roundtrip, "起點": t_start, "訖點": t_end,
                 "出發": f"{t_dep_d} {t_dep_t}", "抵達": f"{t_arr_d} {t_arr_t}",
                 "金額": t_amt, "幣別": t_curr, "付款方式": t_pay_m, "支付人": t_payer,
                 "檔案名": t_file.name if t_file else "無"
             })
             rate = st.session_state.get('jpy_rate', 0.215) if t_curr == "JPY" else (4.5 if t_curr == "CNY" else 1.0)
+            
+            # 設定同步至記帳的標籤
+            trip_tag = "(來回)" if t_is_roundtrip else "(單程)"
+            comp_tag = f"[{t_company}] " if t_company else ""
+            
             save_to_cloud({
-                "日期": str(t_buy_date), "分類": "交通", "項目": f"{t_type}:{t_start}➔{t_end}",
+                "日期": str(t_buy_date), "分類": "交通", "項目": f"{t_type}: {comp_tag}{t_start}➔{t_end} {trip_tag}",
                 "金額": int(t_amt * rate), "付款方式": t_pay_m, "支付人": t_payer, "來源": "清單-交通"
             })
             st.success("✅ 交通支出已同步！")
@@ -166,20 +179,32 @@ with tab_flight:
             start_loc = item.get('起點', item.get('行程', '未知起點'))
             end_loc = item.get('訖點', '')
             
-            exp_title = f"✈️ {item.get('種類', '交通')}: {start_loc}"
+            # 組合列表標題顯示
+            comp_display = f"[{item.get('公司')}] " if item.get('公司') else ""
+            rt_display = "🔄 來回" if item.get('來回') else "➡️ 單程"
+            
+            exp_title = f"✈️ {item.get('種類', '交通')}: {comp_display}{start_loc}"
             if end_loc: exp_title += f"➔{end_loc}"
-            exp_title += f" - {item.get('金額', 0)} {item.get('幣別', 'TWD')}"
+            exp_title += f" ({rt_display}) - {item.get('金額', 0)} {item.get('幣別', 'TWD')}"
             
             with st.expander(exp_title):
                 st.write(f"出發: {item.get('出發', '未設定')} | 抵達: {item.get('抵達', '未設定')} | 支付人: {item.get('支付人', '未知')} | 檔案: {item.get('檔案名', '無')}")
                 
+                c_edit1, c_edit2 = st.columns([3, 1])
+                new_comp = c_edit1.text_input("修改公司名稱", value=item.get('公司', ''), key=f"et_c_{i}")
+                new_rt = c_edit2.checkbox("🔄 這是來回票", value=item.get('來回', False), key=f"et_rt_{i}")
+
                 new_start = st.text_input("修改起點", value=start_loc, key=f"et_s_{i}")
                 new_end = st.text_input("修改訖點", value=end_loc, key=f"et_e_{i}")
                 new_amt = st.number_input("修改金額", value=item.get('金額', 0.0), key=f"et_a_{i}")
                 
                 c1, c2 = st.columns(2)
                 if c1.button("💾 儲存修改", key=f"et_sv_{i}"):
-                    item['起點'] = new_start; item['訖點'] = new_end; item['金額'] = new_amt
+                    item['公司'] = new_comp
+                    item['來回'] = new_rt
+                    item['起點'] = new_start
+                    item['訖點'] = new_end
+                    item['金額'] = new_amt
                     if '行程' in item: del item['行程']
                     st.rerun()
                 if c2.button("🗑️ 刪除", key=f"et_d_{i}"):
