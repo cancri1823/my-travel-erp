@@ -202,7 +202,6 @@ with col_form:
             pt_date = st.date_input("造訪日期", value=date.today())
             pt_lat = st.number_input("緯度", format="%.6f", value=st.session_state.clicked_lat)
         with c2:
-            # 🔴 類型選擇與自訂文字框
             pt_type_sel = st.selectbox("類型", TYPE_OPTIONS)
             pt_type_custom = st.text_input("自訂類型 (若選「其他」請填寫)", placeholder="例如：展覽")
             pt_lng = st.number_input("經度", format="%.6f", value=st.session_state.clicked_lng)
@@ -213,14 +212,12 @@ with col_form:
         with t3: pt_dur_unit = st.selectbox("單位", ["小時", "分鐘"])
             
         pt_desc = st.text_area("筆記", placeholder="回憶內容...", height=80)
-        # 🔴 支援 PDF 與相片上傳
         uploaded_files = st.file_uploader("📷 照片與檔案 (最多20個)", type=["jpg", "jpeg", "png", "pdf"], accept_multiple_files=True)
         
         if st.form_submit_button("💾 記錄並備份至雲端", type="primary", use_container_width=True):
             if not pt_name: 
                 st.error("請填寫景點名稱")
             else:
-                # 決定最終類型
                 final_type = pt_type_custom if pt_type_sel == "其他" and pt_type_custom else pt_type_sel
                 
                 processed_photos = []
@@ -249,7 +246,6 @@ with col_map:
         center = [st.session_state.footprint_data[-1]["緯度"], st.session_state.footprint_data[-1]["經度"]]
     else: center = [st.session_state.clicked_lat, st.session_state.clicked_lng]
 
-    # 🔴 Google Maps 道路底圖
     m = folium.Map(location=center, zoom_start=15, tiles="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps")
     
     Geocoder(position='topleft', collapsed=False, add_marker=True).add_to(m)
@@ -274,171 +270,186 @@ st.subheader("📜 旅程足跡管理")
 if not st.session_state.footprint_data: 
     st.info("尚無足跡資料。")
 else:
-    current_date = None
+    # 🟢 核心修改：依日期分組足跡，以便進行收合檢視
+    date_groups = {}
     for i, pt in enumerate(st.session_state.footprint_data):
-        if pt['日期'] != current_date:
-            st.markdown(f"<div class='date-header'>📅 {pt['日期']}</div>", unsafe_allow_html=True)
-            current_date = pt['日期']
+        d_str = pt['日期']
+        if d_str not in date_groups:
+            date_groups[d_str] = []
+        date_groups[d_str].append((i, pt))
 
-        c_info, c_btns = st.columns([4, 1.2])
-        with c_info:
-            st.markdown(f"""<div class="simple-item"><div><span class="time-tag">🕒 {pt.get('抵達時間','--:--')}</span>
-                <span class="simple-title">{pt['名稱']}</span><span class="simple-meta"> | 停留: {pt.get('停留時間','-')} | {pt.get('類型','其他')}</span></div></div>""", unsafe_allow_html=True)
-        with c_btns:
-            b1, b2, b3 = st.columns(3)
-            b1.button("⬆️", key=f"u_{i}", on_click=move_up, args=(i,), disabled=(i==0))
-            b2.button("⬇️", key=f"d_{i}", on_click=move_down, args=(i,), disabled=(i==len(st.session_state.footprint_data)-1))
-            b3.button("❌", key=f"x_{i}", on_click=delete_pt, args=(i,))
+    # 依日期排序並顯示
+    for d_str in sorted(date_groups.keys()):
+        items = date_groups[d_str]
         
-        with st.expander(f"⚙️ 管理/編輯 {pt['名稱']} 的細節回憶"):
-            tab_edit, tab_pic, tab_exp = st.tabs(["📝 修改基本資料", "📷 照片與檔案管理", "💸 景點花費 (連動雲端)"])
-            
-            # --- Tab 1: 修改基本資料 ---
-            with tab_edit:
-                with st.form(key=f"edit_form_{i}"):
-                    new_n = st.text_input("景點名稱", value=pt['名稱'])
-                    
-                    ec1, ec2, ec3, ec4 = st.columns([1, 1, 1, 1.5])
-                    new_t = ec1.text_input("抵達時間", value=pt.get('抵達時間','10:00'))
-                    new_d = ec2.text_input("停留時間", value=pt.get('停留時間','1 小時'))
-                    
-                    saved_type = pt.get('類型', '其他')
-                    try: type_idx = TYPE_OPTIONS.index(saved_type)
-                    except ValueError: type_idx = 7
-                    
-                    new_type_sel = ec3.selectbox("類型", TYPE_OPTIONS, index=type_idx)
-                    new_type_custom = ec4.text_input("自訂類型(選其他填寫)", value=saved_type if type_idx == 7 else "")
-                    
-                    new_desc = st.text_area("筆記內容", value=pt.get('描述',''))
-                    
-                    st.markdown("---")
-                    more_files = st.file_uploader("➕ 補傳照片/檔案至雲端", type=["jpg","png","jpeg","pdf"], accept_multiple_files=True, key=f"more_{i}")
-                    
-                    if st.form_submit_button("✅ 儲存修改"):
-                        final_edit_type = new_type_custom if new_type_sel == "其他" and new_type_custom else new_type_sel
-                        pt['名稱'], pt['抵達時間'], pt['停留時間'], pt['描述'], pt['類型'] = new_n, new_t, new_d, new_desc, final_edit_type
-                        
-                        if more_files:
-                            pt.setdefault('照片', [])
-                            with st.spinner("🚀 檔案透過 API 上傳至 Google Drive 中..."):
-                                for f in more_files:
-                                    if len(pt['照片']) < 20:
-                                        d_file = upload_to_drive(f)
-                                        if d_file: pt['照片'].append(d_file)
-                        st.success("資料已更新！")
-                        st.rerun()
+        # 標題與收合開關
+        c_head, c_tgl = st.columns([4, 1])
+        with c_head:
+            st.markdown(f"<div class='date-header'>📅 {d_str} <span style='font-size:0.8em; color:#888;'>(共 {len(items)} 個足跡)</span></div>", unsafe_allow_html=True)
+        with c_tgl:
+            st.write("") # 微調對齊
+            is_open = st.toggle("顯示/收合", value=True, key=f"tgl_{d_str}")
 
-            # --- Tab 2: 照片與檔案管理 ---
-            with tab_pic:
-                photos = pt.get("照片", [])
-                if photos:
-                    st.caption(f"☁️ 已備份 {len(photos)} 個檔案至 Google Drive")
-                    cols = st.columns(4)
-                    for idx, img in enumerate(photos):
-                        with cols[idx % 4]:
-                            if "id" in img: # Drive 圖片/檔案
-                                if ".pdf" in img['name'].lower():
-                                    st.info(f"📄 {img['name']}")
-                                else:
-                                    st.image(f"https://drive.google.com/thumbnail?id={img['id']}&sz=w800", use_container_width=True)
-                                st.markdown(f"**[🔗 點擊開啟 / 下載]({img['link']})**")
+        # 若開關為開啟，則顯示該日期的所有足跡
+        if is_open:
+            for i, pt in items:
+                c_info, c_btns = st.columns([4, 1.2])
+                with c_info:
+                    st.markdown(f"""<div class="simple-item"><div><span class="time-tag">🕒 {pt.get('抵達時間','--:--')}</span>
+                        <span class="simple-title">{pt['名稱']}</span><span class="simple-meta"> | 停留: {pt.get('停留時間','-')} | {pt.get('類型','其他')}</span></div></div>""", unsafe_allow_html=True)
+                with c_btns:
+                    b1, b2, b3 = st.columns(3)
+                    b1.button("⬆️", key=f"u_{i}", on_click=move_up, args=(i,), disabled=(i==0))
+                    b2.button("⬇️", key=f"d_{i}", on_click=move_down, args=(i,), disabled=(i==len(st.session_state.footprint_data)-1))
+                    b3.button("❌", key=f"x_{i}", on_click=delete_pt, args=(i,))
+                
+                with st.expander(f"⚙️ 管理/編輯 {pt['名稱']} 的細節回憶"):
+                    tab_edit, tab_pic, tab_exp = st.tabs(["📝 修改基本資料", "📷 照片與檔案管理", "💸 景點花費 (連動雲端)"])
+                    
+                    # --- Tab 1: 修改基本資料 ---
+                    with tab_edit:
+                        with st.form(key=f"edit_form_{i}"):
+                            new_n = st.text_input("景點名稱", value=pt['名稱'])
+                            
+                            ec1, ec2, ec3, ec4 = st.columns([1, 1, 1, 1.5])
+                            new_t = ec1.text_input("抵達時間", value=pt.get('抵達時間','10:00'))
+                            new_d = ec2.text_input("停留時間", value=pt.get('停留時間','1 小時'))
+                            
+                            saved_type = pt.get('類型', '其他')
+                            try: type_idx = TYPE_OPTIONS.index(saved_type)
+                            except ValueError: type_idx = 7
+                            
+                            new_type_sel = ec3.selectbox("類型", TYPE_OPTIONS, index=type_idx)
+                            new_type_custom = ec4.text_input("自訂類型(選其他填寫)", value=saved_type if type_idx == 7 else "")
+                            
+                            new_desc = st.text_area("筆記內容", value=pt.get('描述',''))
+                            
+                            st.markdown("---")
+                            more_files = st.file_uploader("➕ 補傳照片/檔案至雲端", type=["jpg","png","jpeg","pdf"], accept_multiple_files=True, key=f"more_{i}")
+                            
+                            if st.form_submit_button("✅ 儲存修改"):
+                                final_edit_type = new_type_custom if new_type_sel == "其他" and new_type_custom else new_type_sel
+                                pt['名稱'], pt['抵達時間'], pt['停留時間'], pt['描述'], pt['類型'] = new_n, new_t, new_d, new_desc, final_edit_type
                                 
-                            # 兼容舊的暫存資料
-                            elif "data" in img:
-                                st.image(img["data"], use_container_width=True)
-                                
-                            if st.button("🗑️ 移除", key=f"del_img_{i}_{idx}"):
-                                pt['照片'].pop(idx)
+                                if more_files:
+                                    pt.setdefault('照片', [])
+                                    with st.spinner("🚀 檔案透過 API 上傳至 Google Drive 中..."):
+                                        for f in more_files:
+                                            if len(pt['照片']) < 20:
+                                                d_file = upload_to_drive(f)
+                                                if d_file: pt['照片'].append(d_file)
+                                st.success("資料已更新！")
                                 st.rerun()
-                else: 
-                    st.info("尚未上傳照片或檔案。")
 
-            # --- Tab 3: 景點花費 (包含修改與刪除) ---
-            with tab_exp:
-                # 動態從雲端撈取屬於這個景點的消費紀錄來顯示與編輯
-                cloud_df = fetch_cloud_expenses(target_sheet)
-                if not cloud_df.empty and "來源" in cloud_df.columns:
-                    pt_expenses = cloud_df[cloud_df["來源"] == f"📍 足跡: {pt['名稱']}"]
-                    
-                    if not pt_expenses.empty:
-                        for idx, e in pt_expenses.iterrows():
-                            with st.expander(f"✅ [{e.get('分類','其他')}] {e.get('項目','')} : NT$ {e.get('金額',0):,} (由 {e.get('支付人','未知')} 支付)"):
-                                
-                                cat_opts = ["餐飲", "門票/娛樂", "交通", "購物", "其他"]
-                                cat_val = e.get('分類', '其他')
-                                cat_idx = cat_opts.index(cat_val) if cat_val in cat_opts else 4
-                                new_cat = st.selectbox("修改分類", cat_opts, index=cat_idx, key=f"ecat_{i}_{idx}")
-                                
-                                new_item = st.text_input("修改項目", value=e.get('項目', ''), key=f"eitem_{i}_{idx}")
-                                
-                                col_a, col_pm, col_py = st.columns(3)
-                                try: default_amt = float(e.get('金額', 0))
-                                except: default_amt = 0.0
-                                new_amt = col_a.number_input("修改金額 (TWD)", value=default_amt, key=f"eamt_{i}_{idx}")
-                                
-                                pm_opts = ["現金", "信用卡", "電子支付", "公費扣款"]
-                                pm_val = e.get('付款方式', '現金')
-                                pm_idx = pm_opts.index(pm_val) if pm_val in pm_opts else 0
-                                new_pm = col_pm.selectbox("修改付款方式", pm_opts, index=pm_idx, key=f"epm_{i}_{idx}")
-                                
-                                new_pyr = col_py.text_input("修改支付人", value=e.get('支付人', '自己'), key=f"epyr_{i}_{idx}")
-                                
-                                bc1, bc2 = st.columns(2)
-                                if bc1.button("💾 儲存修改", key=f"esv_{i}_{idx}"):
-                                    update_in_cloud(idx, {
-                                        "分類": new_cat, "項目": new_item, "金額": int(new_amt), 
-                                        "付款方式": new_pm, "支付人": new_pyr
-                                    })
-                                    st.success("已更新雲端資料！")
-                                    st.rerun()
-                                if bc2.button("🗑️ 刪除", key=f"edel_{i}_{idx}"):
-                                    delete_from_cloud(idx)
-                                    st.success("已從雲端刪除！")
-                                    st.rerun()
-                    else:
-                        st.caption("目前此景點無花費紀錄。")
-                
-                st.write("---")
-                
-                # 新增消費的表單
-                with st.form(key=f"exp_{i}", clear_on_submit=True):
-                    st.caption("➕ 新增景點花費")
-                    c1, c2 = st.columns([1, 1.5])
-                    e_cat = c1.selectbox("分類", ["餐飲", "門票/娛樂", "交通", "購物", "其他"], key=f"ec_{i}")
-                    e_item = c2.text_input("項目", value=pt['名稱'], key=f"ei_{i}")
-                    
-                    c3, c4, c4_extra = st.columns([1, 1, 1])
-                    e_amt = c3.number_input("金額", min_value=0.0, key=f"ea_{i}")
-                    
-                    e_curr_sel = c4.selectbox("幣別", CURR_OPTIONS, key=f"ecu_{i}")
-                    e_curr_cust = c4_extra.text_input("自訂幣別 (若選自行輸入)", placeholder="如: THB", key=f"ecucust_{i}")
-                    
-                    c5, c6 = st.columns(2)
-                    e_payer = c5.text_input("支付人", value="自己", key=f"epayer_{i}")
-                    e_pay_method = c6.selectbox("付款方式", ["現金", "信用卡", "電子支付", "公費扣款"], key=f"epm_{i}")
-                    
-                    if st.form_submit_button("➕ 寫入雲端總帳", type="primary", use_container_width=True):
-                        if e_amt > 0:
-                            # 判斷最終幣別
-                            final_curr = e_curr_cust if e_curr_sel == "自行輸入" and e_curr_cust else e_curr_sel
+                    # --- Tab 2: 照片與檔案管理 ---
+                    with tab_pic:
+                        photos = pt.get("照片", [])
+                        if photos:
+                            st.caption(f"☁️ 已備份 {len(photos)} 個檔案至 Google Drive")
+                            cols = st.columns(4)
+                            for idx, img in enumerate(photos):
+                                with cols[idx % 4]:
+                                    if "id" in img: # Drive 圖片/檔案
+                                        if ".pdf" in img['name'].lower():
+                                            st.info(f"📄 {img['name']}")
+                                        else:
+                                            st.image(f"https://drive.google.com/thumbnail?id={img['id']}&sz=w800", use_container_width=True)
+                                        st.markdown(f"**[🔗 點擊開啟 / 下載]({img['link']})**")
+                                        
+                                    # 兼容舊的暫存資料
+                                    elif "data" in img:
+                                        st.image(img["data"], use_container_width=True)
+                                        
+                                    if st.button("🗑️ 移除", key=f"del_img_{i}_{idx}"):
+                                        pt['照片'].pop(idx)
+                                        st.rerun()
+                        else: 
+                            st.info("尚未上傳照片或檔案。")
+
+                    # --- Tab 3: 景點花費 (包含修改與刪除) ---
+                    with tab_exp:
+                        # 動態從雲端撈取屬於這個景點的消費紀錄來顯示與編輯
+                        cloud_df = fetch_cloud_expenses(target_sheet)
+                        if not cloud_df.empty and "來源" in cloud_df.columns:
+                            pt_expenses = cloud_df[cloud_df["來源"] == f"📍 足跡: {pt['名稱']}"]
                             
-                            # 簡單匯率計算
-                            rates = {"JPY": st.session_state.get('jpy_rate', 0.215), "CNY": 4.5, "USD": 32.5, "EUR": 35.0, "TWD": 1.0}
-                            rate = rates.get(final_curr, 1.0)
+                            if not pt_expenses.empty:
+                                for idx, e in pt_expenses.iterrows():
+                                    with st.expander(f"✅ [{e.get('分類','其他')}] {e.get('項目','')} : NT$ {e.get('金額',0):,} (由 {e.get('支付人','未知')} 支付)"):
+                                        
+                                        cat_opts = ["餐飲", "門票/娛樂", "交通", "購物", "其他"]
+                                        cat_val = e.get('分類', '其他')
+                                        cat_idx = cat_opts.index(cat_val) if cat_val in cat_opts else 4
+                                        new_cat = st.selectbox("修改分類", cat_opts, index=cat_idx, key=f"ecat_{i}_{idx}")
+                                        
+                                        new_item = st.text_input("修改項目", value=e.get('項目', ''), key=f"eitem_{i}_{idx}")
+                                        
+                                        col_a, col_pm, col_py = st.columns(3)
+                                        try: default_amt = float(e.get('金額', 0))
+                                        except: default_amt = 0.0
+                                        new_amt = col_a.number_input("修改金額 (TWD)", value=default_amt, key=f"eamt_{i}_{idx}")
+                                        
+                                        pm_opts = ["現金", "信用卡", "電子支付", "公費扣款"]
+                                        pm_val = e.get('付款方式', '現金')
+                                        pm_idx = pm_opts.index(pm_val) if pm_val in pm_opts else 0
+                                        new_pm = col_pm.selectbox("修改付款方式", pm_opts, index=pm_idx, key=f"epm_{i}_{idx}")
+                                        
+                                        new_pyr = col_py.text_input("修改支付人", value=e.get('支付人', '自己'), key=f"epyr_{i}_{idx}")
+                                        
+                                        bc1, bc2 = st.columns(2)
+                                        if bc1.button("💾 儲存修改", key=f"esv_{i}_{idx}"):
+                                            update_in_cloud(idx, {
+                                                "分類": new_cat, "項目": new_item, "金額": int(new_amt), 
+                                                "付款方式": new_pm, "支付人": new_pyr
+                                            })
+                                            st.success("已更新雲端資料！")
+                                            st.rerun()
+                                        if bc2.button("🗑️ 刪除", key=f"edel_{i}_{idx}"):
+                                            delete_from_cloud(idx)
+                                            st.success("已從雲端刪除！")
+                                            st.rerun()
+                            else:
+                                st.caption("目前此景點無花費紀錄。")
+                        
+                        st.write("---")
+                        
+                        # 新增消費的表單
+                        with st.form(key=f"exp_{i}", clear_on_submit=True):
+                            st.caption("➕ 新增景點花費")
+                            c1, c2 = st.columns([1, 1.5])
+                            e_cat = c1.selectbox("分類", ["餐飲", "門票/娛樂", "交通", "購物", "其他"], key=f"ec_{i}")
+                            e_item = c2.text_input("項目", value=pt['名稱'], key=f"ei_{i}")
                             
-                            new_row = pd.DataFrame([{
-                                "日期": pt['日期'], 
-                                "分類": e_cat,
-                                "項目": f"{e_item} ({final_curr} {e_amt})",
-                                "金額": int(e_amt * rate), 
-                                "付款方式": e_pay_method, 
-                                "支付人": e_payer,
-                                "來源": f"📍 足跡: {pt['名稱']}"
-                            }])
+                            c3, c4, c4_extra = st.columns([1, 1, 1])
+                            e_amt = c3.number_input("金額", min_value=0.0, key=f"ea_{i}")
                             
-                            with st.spinner(f"🚀 正在同步至 {target_sheet}..."):
-                                if save_spot_exp_to_cloud(new_row):
-                                    st.success("✅ 景點花費已同步至總帳！")
-                                    st.rerun()
-                        else:
-                            st.warning("請填寫大於 0 的金額")
+                            e_curr_sel = c4.selectbox("幣別", CURR_OPTIONS, key=f"ecu_{i}")
+                            e_curr_cust = c4_extra.text_input("自訂幣別 (若選自行輸入)", placeholder="如: THB", key=f"ecucust_{i}")
+                            
+                            c5, c6 = st.columns(2)
+                            e_payer = c5.text_input("支付人", value="自己", key=f"epayer_{i}")
+                            e_pay_method = c6.selectbox("付款方式", ["現金", "信用卡", "電子支付", "公費扣款"], key=f"epm_{i}")
+                            
+                            if st.form_submit_button("➕ 寫入雲端總帳", type="primary", use_container_width=True):
+                                if e_amt > 0:
+                                    final_curr = e_curr_cust if e_curr_sel == "自行輸入" and e_curr_cust else e_curr_sel
+                                    
+                                    rates = {"JPY": st.session_state.get('jpy_rate', 0.215), "CNY": 4.5, "USD": 32.5, "EUR": 35.0, "TWD": 1.0}
+                                    rate = rates.get(final_curr, 1.0)
+                                    
+                                    new_row = pd.DataFrame([{
+                                        "日期": pt['日期'], 
+                                        "分類": e_cat,
+                                        "項目": f"{e_item} ({final_curr} {e_amt})",
+                                        "金額": int(e_amt * rate), 
+                                        "付款方式": e_pay_method, 
+                                        "支付人": e_payer,
+                                        "來源": f"📍 足跡: {pt['名稱']}"
+                                    }])
+                                    
+                                    with st.spinner(f"🚀 正在同步至 {target_sheet}..."):
+                                        if save_spot_exp_to_cloud(new_row):
+                                            st.success("✅ 景點花費已同步至總帳！")
+                                            st.rerun()
+                                else:
+                                    st.warning("請填寫大於 0 的金額")
