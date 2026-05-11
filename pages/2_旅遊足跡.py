@@ -25,7 +25,6 @@ except Exception as e:
     st.error(f"連線初始化失敗: {e}")
     st.stop()
 
-# 🔴 擴充欄位：新增「支付人」
 EXPECTED_COLUMNS = ["日期", "分類", "項目", "金額", "付款方式", "支付人", "來源"]
 CURR_OPTIONS = ["TWD", "USD", "EUR", "JPY", "CNY", "自行輸入"]
 
@@ -166,7 +165,8 @@ with col_form:
             pt_lng = st.number_input("經度", format="%.6f", value=st.session_state.clicked_lng)
         
         t1, t2, t3 = st.columns([1.2, 1, 1])
-        with t1: pt_arrival = st.time_input("抵達時間", value=time(10, 0))
+        # ✅ 將時間改為自由輸入的 text_input
+        with t1: pt_arrival = st.text_input("抵達時間", placeholder="例如: 10:30 或 下午")
         with t2: pt_dur_val = st.number_input("停留時長", min_value=0, value=1)
         with t3: pt_dur_unit = st.selectbox("單位", ["小時", "分鐘"])
             
@@ -184,7 +184,7 @@ with col_form:
                 new_pt = {
                     "名稱": pt_name, "日期": str(pt_date), "類型": pt_type,
                     "緯度": pt_lat, "經度": pt_lng, 
-                    "抵達時間": pt_arrival.strftime("%H:%M"),
+                    "抵達時間": pt_arrival if pt_arrival else "未定",  # ✅ 直接記錄輸入字串
                     "停留時間": f"{pt_dur_val} {pt_dur_unit}",
                     "描述": pt_desc, "照片": processed_photos
                 }
@@ -246,7 +246,7 @@ else:
                 with st.form(key=f"edit_form_{i}"):
                     new_n = st.text_input("景點名稱", value=pt['名稱'])
                     ec1, ec2, ec3 = st.columns([1, 1, 1.5])
-                    new_t = ec1.text_input("抵達時間 (HH:MM)", value=pt.get('抵達時間','10:00'))
+                    new_t = ec1.text_input("抵達時間", value=pt.get('抵達時間','10:00'))
                     new_d = ec2.text_input("停留時間", value=pt.get('停留時間','1 小時'))
                     saved_type = pt.get('類型', '其他')
                     try: type_idx = TYPE_OPTIONS.index(saved_type)
