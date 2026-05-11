@@ -6,7 +6,49 @@ from folium.plugins import Geocoder
 from streamlit_folium import st_folium
 from streamlit_gsheets import GSheetsConnection
 
+# 🔴 引入新的套件 (取代原本的 google-auth 等套件)
+import requests
+import base64
+import io
+
 st.set_page_config(page_title="旅遊足跡與地圖", page_icon="🗺️", layout="wide")
+
+# 🚨 你的專屬 Google Drive 資料夾 ID
+DRIVE_FOLDER_ID = "1SefKSIJqll7JVM8aJiCFXglMc_Z9bZ7_"
+
+# 🚨 你的專屬 Apps Script 中繼站網址
+GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz6PW52sypsU2nW6XcXMqaCcp3tmWPtLPhzbW2s9O4ENFksxM2IjkjWIiYwfd6Cq7Z-/exec"
+
+def upload_to_drive(uploaded_file):
+    """透過 Google Apps Script 中繼站上傳檔案"""
+    if uploaded_file is None: return None
+    try:
+        # 將檔案轉為 Base64 格式 (這是網路傳輸圖片最安全的方式)
+        file_bytes = uploaded_file.getvalue()
+        b64_data = base64.b64encode(file_bytes).decode('utf-8')
+        mime_type = uploaded_file.type if hasattr(uploaded_file, 'type') else 'application/octet-stream'
+        
+        # 準備傳送給中繼站的資料包裹
+        payload = {
+            "folderId": DRIVE_FOLDER_ID,
+            "fileName": uploaded_file.name,
+            "mimeType": mime_type,
+            "fileBase64": b64_data
+        }
+        
+        # 發射！把資料丟給你的 Apps Script 分身
+        response = requests.post(GAS_WEB_APP_URL, json=payload)
+        result = response.json()
+        
+        if result.get("status") == "success":
+            return {"name": result.get("name"), "link": result.get("link"), "id": result.get("id")}
+        else:
+            st.error(f"⚠️ Apps Script 中繼站錯誤: {result.get('message')}")
+            return None
+            
+    except Exception as e:
+        st.error(f"⚠️ 檔案上傳失敗 (網路或請求錯誤): {e}")
+        return None
 
 # --- 0. 旅程動態對接邏輯 ---
 target_sheet = st.session_state.get('active_trip_sheet', 'Exp_Yunnan2026')
@@ -60,7 +102,6 @@ def save_spot_exp_to_cloud(new_row_df):
         st.error(f"❌ 同步失敗: {e}")
         return False
 
-# --- 新增：更新與刪除函數 ---
 def update_in_cloud(row_index, updated_dict):
     try:
         df = conn.read(worksheet=target_sheet, ttl=0)
@@ -114,7 +155,6 @@ st.markdown("""
         color: #ffa500; font-weight: bold; background: rgba(255, 165, 0, 0.1);
         padding: 2px 6px; border-radius: 4px; margin-right: 5px;
     }
-    /* 確保地圖搜尋框置頂顯示 */
     .leaflet-control-geocoder { 
         margin-top: 10px !important; 
         background: white !important; 
@@ -126,7 +166,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🗺️ 數位旅遊足跡與動線 (搜尋強化版)")
+st.title("🗺️ 數位旅遊足跡與動線 (API 無限備份版)")
 
 # --- 2. 足跡本地端狀態初始化 ---
 if 'footprint_data' not in st.session_state: st.session_state.footprint_data = []
@@ -156,40 +196,51 @@ with col_form:
     st.header("📍 新增足跡點")
     with st.form("footprint_form", clear_on_submit=True):
         pt_name = st.text_input("景點名稱*", placeholder="例如：新倉淺間神社")
+        
         c1, c2 = st.columns(2)
         with c1:
             pt_date = st.date_input("造訪日期", value=date.today())
             pt_lat = st.number_input("緯度", format="%.6f", value=st.session_state.clicked_lat)
         with c2:
-            pt_type = st.selectbox("類型", TYPE_OPTIONS)
+            # 🔴 類型選擇與自訂文字框
+            pt_type_sel = st.selectbox("類型", TYPE_OPTIONS)
+            pt_type_custom = st.text_input("自訂類型 (若選「其他」請填寫)", placeholder="例如：展覽")
             pt_lng = st.number_input("經度", format="%.6f", value=st.session_state.clicked_lng)
         
         t1, t2, t3 = st.columns([1.2, 1, 1])
-        # ✅ 將時間改為自由輸入的 text_input
         with t1: pt_arrival = st.text_input("抵達時間", placeholder="例如: 10:30 或 下午")
         with t2: pt_dur_val = st.number_input("停留時長", min_value=0, value=1)
         with t3: pt_dur_unit = st.selectbox("單位", ["小時", "分鐘"])
             
         pt_desc = st.text_area("筆記", placeholder="回憶內容...", height=80)
-        uploaded_files = st.file_uploader("📷 照片 (最多20張)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        # 🔴 支援 PDF 與相片上傳
+        uploaded_files = st.file_uploader("📷 照片與檔案 (最多20個)", type=["jpg", "jpeg", "png", "pdf"], accept_multiple_files=True)
         
-        if st.form_submit_button("💾 記錄空間足跡", type="primary", use_container_width=True):
+        if st.form_submit_button("💾 記錄並備份至雲端", type="primary", use_container_width=True):
             if not pt_name: 
                 st.error("請填寫景點名稱")
             else:
+                # 決定最終類型
+                final_type = pt_type_custom if pt_type_sel == "其他" and pt_type_custom else pt_type_sel
+                
                 processed_photos = []
                 if uploaded_files:
-                    for f in uploaded_files[:20]:
-                        processed_photos.append({"name": f.name, "data": f.read()})
+                    with st.spinner("🚀 檔案透過 API 上傳至 Google Drive 中，請稍候..."):
+                        for f in uploaded_files[:20]:
+                            d_file = upload_to_drive(f)
+                            if d_file: processed_photos.append(d_file)
+                
                 new_pt = {
-                    "名稱": pt_name, "日期": str(pt_date), "類型": pt_type,
+                    "名稱": pt_name, "日期": str(pt_date), "類型": final_type,
                     "緯度": pt_lat, "經度": pt_lng, 
-                    "抵達時間": pt_arrival if pt_arrival else "未定",  # ✅ 直接記錄輸入字串
+                    "抵達時間": pt_arrival if pt_arrival else "未定", 
                     "停留時間": f"{pt_dur_val} {pt_dur_unit}",
                     "描述": pt_desc, "照片": processed_photos
                 }
                 st.session_state.footprint_data.append(new_pt)
+                st.success("✅ 記錄與檔案已備份成功！")
                 st.rerun()
+                
     st.info("💡 提示：地圖搜尋到位置後點擊，座標會自動填入上方。")
 
 with col_map:
@@ -198,7 +249,8 @@ with col_map:
         center = [st.session_state.footprint_data[-1]["緯度"], st.session_state.footprint_data[-1]["經度"]]
     else: center = [st.session_state.clicked_lat, st.session_state.clicked_lng]
 
-    m = folium.Map(location=center, zoom_start=15, tiles="CartoDB positron")
+    # 🔴 Google Maps 道路底圖
+    m = folium.Map(location=center, zoom_start=15, tiles="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps")
     
     Geocoder(position='topleft', collapsed=False, add_marker=True).add_to(m)
     
@@ -239,48 +291,67 @@ else:
             b3.button("❌", key=f"x_{i}", on_click=delete_pt, args=(i,))
         
         with st.expander(f"⚙️ 管理/編輯 {pt['名稱']} 的細節回憶"):
-            tab_edit, tab_pic, tab_exp = st.tabs(["📝 修改基本資料", "📷 照片管理", "💸 景點花費 (連動雲端)"])
+            tab_edit, tab_pic, tab_exp = st.tabs(["📝 修改基本資料", "📷 照片與檔案管理", "💸 景點花費 (連動雲端)"])
             
             # --- Tab 1: 修改基本資料 ---
             with tab_edit:
                 with st.form(key=f"edit_form_{i}"):
                     new_n = st.text_input("景點名稱", value=pt['名稱'])
-                    ec1, ec2, ec3 = st.columns([1, 1, 1.5])
+                    
+                    ec1, ec2, ec3, ec4 = st.columns([1, 1, 1, 1.5])
                     new_t = ec1.text_input("抵達時間", value=pt.get('抵達時間','10:00'))
                     new_d = ec2.text_input("停留時間", value=pt.get('停留時間','1 小時'))
+                    
                     saved_type = pt.get('類型', '其他')
                     try: type_idx = TYPE_OPTIONS.index(saved_type)
                     except ValueError: type_idx = 7
-                    new_type = ec3.selectbox("類型", TYPE_OPTIONS, index=type_idx)
+                    
+                    new_type_sel = ec3.selectbox("類型", TYPE_OPTIONS, index=type_idx)
+                    new_type_custom = ec4.text_input("自訂類型(選其他填寫)", value=saved_type if type_idx == 7 else "")
+                    
                     new_desc = st.text_area("筆記內容", value=pt.get('描述',''))
                     
                     st.markdown("---")
-                    more_files = st.file_uploader("➕ 補傳照片", type=["jpg","png"], accept_multiple_files=True, key=f"more_{i}")
+                    more_files = st.file_uploader("➕ 補傳照片/檔案至雲端", type=["jpg","png","jpeg","pdf"], accept_multiple_files=True, key=f"more_{i}")
                     
                     if st.form_submit_button("✅ 儲存修改"):
-                        pt['名稱'], pt['抵達時間'], pt['停留時間'], pt['描述'], pt['類型'] = new_n, new_t, new_d, new_desc, new_type
+                        final_edit_type = new_type_custom if new_type_sel == "其他" and new_type_custom else new_type_sel
+                        pt['名稱'], pt['抵達時間'], pt['停留時間'], pt['描述'], pt['類型'] = new_n, new_t, new_d, new_desc, final_edit_type
+                        
                         if more_files:
                             pt.setdefault('照片', [])
-                            for f in more_files:
-                                if len(pt['照片']) < 20:
-                                    pt['照片'].append({"name": f.name, "data": f.read()})
+                            with st.spinner("🚀 檔案透過 API 上傳至 Google Drive 中..."):
+                                for f in more_files:
+                                    if len(pt['照片']) < 20:
+                                        d_file = upload_to_drive(f)
+                                        if d_file: pt['照片'].append(d_file)
                         st.success("資料已更新！")
                         st.rerun()
 
-            # --- Tab 2: 照片管理 ---
+            # --- Tab 2: 照片與檔案管理 ---
             with tab_pic:
                 photos = pt.get("照片", [])
                 if photos:
-                    st.caption(f"目前已有 {len(photos)} 張照片")
+                    st.caption(f"☁️ 已備份 {len(photos)} 個檔案至 Google Drive")
                     cols = st.columns(4)
                     for idx, img in enumerate(photos):
                         with cols[idx % 4]:
-                            st.image(img["data"], use_container_width=True)
-                            if st.button("🗑️ 刪除", key=f"del_img_{i}_{idx}"):
+                            if "id" in img: # Drive 圖片/檔案
+                                if ".pdf" in img['name'].lower():
+                                    st.info(f"📄 {img['name']}")
+                                else:
+                                    st.image(f"https://drive.google.com/thumbnail?id={img['id']}&sz=w800", use_container_width=True)
+                                st.markdown(f"**[🔗 點擊開啟 / 下載]({img['link']})**")
+                                
+                            # 兼容舊的暫存資料
+                            elif "data" in img:
+                                st.image(img["data"], use_container_width=True)
+                                
+                            if st.button("🗑️ 移除", key=f"del_img_{i}_{idx}"):
                                 pt['照片'].pop(idx)
                                 st.rerun()
                 else: 
-                    st.info("尚未上傳照片。")
+                    st.info("尚未上傳照片或檔案。")
 
             # --- Tab 3: 景點花費 (包含修改與刪除) ---
             with tab_exp:
@@ -339,7 +410,6 @@ else:
                     c3, c4, c4_extra = st.columns([1, 1, 1])
                     e_amt = c3.number_input("金額", min_value=0.0, key=f"ea_{i}")
                     
-                    # 🔴 擴充：幣別選擇包含「自行輸入」
                     e_curr_sel = c4.selectbox("幣別", CURR_OPTIONS, key=f"ecu_{i}")
                     e_curr_cust = c4_extra.text_input("自訂幣別 (若選自行輸入)", placeholder="如: THB", key=f"ecucust_{i}")
                     
