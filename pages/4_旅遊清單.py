@@ -115,7 +115,7 @@ with tab_ins:
                     st.rerun()
 
 # ==========================================
-# 2. 交通銜接 (已新增公司名稱與來回選項)
+# 2. 交通銜接 (已將時間改為自行輸入的文字框)
 # ==========================================
 with tab_flight:
     st.header("✈️ 航班與交通銜接")
@@ -134,9 +134,11 @@ with tab_flight:
     
     c_dep1, c_dep2, c_arr1, c_arr2 = st.columns(4)
     t_dep_d = c_dep1.date_input("出發日期")
-    t_dep_t = c_dep2.time_input("出發時間")
+    # ✅ 修改為 st.text_input 讓您可以自由輸入時間
+    t_dep_t = c_dep2.text_input("出發時間", placeholder="例如: 08:30")
     t_arr_d = c_arr1.date_input("抵達日期")
-    t_arr_t = c_arr2.time_input("抵達時間")
+    # ✅ 修改為 st.text_input 讓您可以自由輸入時間
+    t_arr_t = c_arr2.text_input("抵達時間", placeholder="例如: 15:45")
     
     c4, c5, c6 = st.columns(3)
     t_buy_date = c4.date_input("購買日期", key="t_bd")
@@ -330,7 +332,7 @@ with tab_ticket:
                     st.rerun()
 
 # ==========================================
-# 5. 換匯紀錄 (已修正 Key 名稱衝突)
+# 5. 換匯紀錄 
 # ==========================================
 with tab_cash:
     st.header("💰 分批換匯與現金紀錄")
@@ -382,7 +384,6 @@ with tab_cash:
                 try: default_date = pd.to_datetime(item.get('日期', pd.Timestamp.now().date())).date()
                 except: default_date = pd.Timestamp.now().date()
                 
-                # 🔴 修正處：將 key 命名確保唯一性
                 new_d = st.date_input("修改日期", value=default_date, key=f"ex_date_{i}")
                 new_l = st.text_input("修改地點", value=item.get('地點',''), key=f"ex_loc_{i}")
                 
@@ -411,7 +412,6 @@ with tab_cash:
                         if old_k in item: del item[old_k]
                     st.rerun()
                 
-                # 🔴 修正處：將按鈕 key 命名為唯一的 ex_del_i
                 if c_btn2.button("🗑️ 刪除", key=f"ex_del_{i}"):
                     st.session_state.exchange_records.pop(i)
                     st.rerun()
