@@ -63,14 +63,6 @@ def parse_expense_item(item_str):
 target_sheet = st.session_state.get('active_trip_sheet', 'Exp_Yunnan2026')
 target_name = st.session_state.get('active_trip_name', '2026 雲南探索 (預設)')
 
-with st.sidebar:
-    st.header("🎯 核心戰情室")
-    st.success(f"目前檢視旅程：\n\n**{target_name}**")
-    st.caption(f"數據來源分頁：`{target_sheet}`")
-    st.divider()
-    budget = st.number_input("💸 設定此旅程總預算 (TWD)", min_value=0, value=st.session_state.get('travel_budget', 50000))
-    st.session_state['travel_budget'] = budget
-
 # --- 1. 雲端連線與資料讀取 ---
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -79,10 +71,50 @@ except Exception as e:
 
 EXPECTED_COLUMNS = ["日期", "分類", "項目", "金額", "付款方式", "支付人", "來源"]
 
+# 讀取「雲端預算」的專屬功能
+def get_cloud_budget():
+    try:
+        df = conn.read(worksheet=target_sheet, ttl=0)
+        if not df.empty and '分類' in df.columns:
+            budget_row = df[df['分類'] == '系統設定']
+            if not budget_row.empty:
+                return int(budget_row['金額'].values[0])
+        return 50000 
+    except:
+        return 50000
+
+# 寫入「雲端預算」的專屬功能
+def save_budget_to_cloud(new_budget):
+    try:
+        df = conn.read(worksheet=target_sheet, ttl=0)
+        for col in EXPECTED_COLUMNS:
+            if not df.empty and col not in df.columns: df[col] = "未知"
+            
+        if not df.empty and '分類' in df.columns:
+            budget_idx = df[df['分類'] == '系統設定'].index
+            if not budget_idx.empty:
+                df.at[budget_idx[0], '金額'] = new_budget
+            else:
+                new_row = pd.DataFrame([{"日期": str(pd.Timestamp.now().date()), "分類": "系統設定", "項目": "總預算", "金額": new_budget, "付款方式": "-", "支付人": "-", "來源": "系統"}])
+                df = pd.concat([df, new_row], ignore_index=True)
+        else:
+            df = pd.DataFrame([{"日期": str(pd.Timestamp.now().date()), "分類": "系統設定", "項目": "總預算", "金額": new_budget, "付款方式": "-", "支付人": "-", "來源": "系統"}])
+            
+        conn.update(worksheet=target_sheet, data=df[EXPECTED_COLUMNS])
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"❌ 預算更新失敗: {e}")
+        return False
+
 def fetch_data():
     try:
         df = conn.read(worksheet=target_sheet, ttl=0)
         if df.empty: return pd.DataFrame(columns=EXPECTED_COLUMNS)
+        
+        # 過濾掉預算設定的資料行
+        df = df[df['分類'] != '系統設定'].copy()
+        
         df["金額"] = pd.to_numeric(df["金額"], errors='coerce').fillna(0)
         if "分類" in df.columns:
             df["分類"] = df["分類"].replace({"門票娛樂": "門票/娛樂", "門票": "門票/娛樂"})
@@ -91,7 +123,7 @@ def fetch_data():
 
 def save_to_cloud(new_row_df):
     try:
-        existing_df = fetch_data()
+        existing_df = conn.read(worksheet=target_sheet, ttl=0)
         for col in EXPECTED_COLUMNS:
             if not existing_df.empty and col not in existing_df.columns: existing_df[col] = "未知"
         updated_df = new_row_df if existing_df.empty else pd.concat([existing_df, new_row_df], ignore_index=True)
@@ -115,9 +147,26 @@ def delete_from_cloud(row_index):
         st.cache_data.clear(); return True
     except Exception as e: st.error(f"❌ 雲端刪除失敗: {e}"); return False
 
+# --- 側邊欄與預算設定 ---
+cloud_budget = get_cloud_budget()
+
+with st.sidebar:
+    st.header("🎯 核心戰情室")
+    st.success(f"目前檢視旅程：\n\n**{target_name}**")
+    st.caption(f"數據來源分頁：`{target_sheet}`")
+    st.divider()
+    
+    budget_input = st.number_input("💸 設定此旅程總預算 (TWD)", min_value=0, value=cloud_budget)
+    if st.button("💾 儲存總預算", type="primary", use_container_width=True):
+        with st.spinner("同步預算至雲端..."):
+            if save_budget_to_cloud(budget_input):
+                st.success("✅ 預算已永久保存！")
+                st.rerun()
+
 # --- 2. 數據計算 ---
 df_all = fetch_data()
 total_spent = int(df_all["金額"].sum()) if not df_all.empty else 0
+budget = get_cloud_budget() 
 remaining = budget - total_spent
 progress = min(total_spent / budget, 1.0) if budget > 0 else 0
 
@@ -170,7 +219,6 @@ with col_form:
         e_pay_m = c_pay_m.selectbox("付款方式", ["現金", "信用卡", "電子支付", "公費扣款"])
         e_payer = c_payer.text_input("支付人", value="自己")
         
-        # 🔴 動態國外處理費與自動計算
         e_fee = 0.0
         final_curr = e_curr_cust if e_curr_sel == "自行輸入" else e_curr_sel
         if final_curr != "TWD" and e_pay_m == "信用卡":
@@ -208,9 +256,24 @@ with col_form:
 
 with col_list:
     st.subheader("📜 總花費明細 (雲端即時連動)")
+    
+    # 🟢 核心新增：搜尋功能
+    search_query = st.text_input("🔍 搜尋明細", placeholder="搜尋項目、分類、支付人或商店關鍵字...")
+    
     if not df_all.empty:
+        # 先進行排序
         df_display = df_all.sort_values(by="日期", ascending=False)
         
+        # 執行過濾邏輯
+        if search_query:
+            # 搜尋項目、分類、支付人（忽略大小寫）
+            df_display = df_display[
+                df_display['項目'].str.contains(search_query, case=False, na=False) |
+                df_display['分類'].str.contains(search_query, case=False, na=False) |
+                df_display['支付人'].str.contains(search_query, case=False, na=False)
+            ]
+            st.caption(f"已顯示關於『{search_query}』的 {len(df_display)} 筆搜尋結果")
+
         for idx, row in df_display.iterrows():
             item_text = str(row.get('項目', ''))
             name_val, store_val, loc_val, curr_val, orig_amt_val, fee_val = parse_expense_item(item_text)
@@ -221,7 +284,7 @@ with col_list:
             exp_title = f"🧾 {row.get('日期', '')} | [{row.get('分類', '其他')}] {name_val} - NT$ {row.get('金額', 0):,} ({row.get('支付人', '未知')})"
             
             with st.expander(exp_title):
-                # 🖼️ 收據預覽與下載區
+                # 收據預覽與下載區
                 col_p1, col_p2 = st.columns([1, 1])
                 with col_p1:
                     if drive_id:
