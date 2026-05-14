@@ -6,7 +6,6 @@ from folium.plugins import Geocoder
 from streamlit_folium import st_folium
 from streamlit_gsheets import GSheetsConnection
 
-# 🔴 引入新的套件 (取代原本的 google-auth 等套件)
 import requests
 import base64
 import io
@@ -23,12 +22,10 @@ def upload_to_drive(uploaded_file):
     """透過 Google Apps Script 中繼站上傳檔案"""
     if uploaded_file is None: return None
     try:
-        # 將檔案轉為 Base64 格式 (這是網路傳輸圖片最安全的方式)
         file_bytes = uploaded_file.getvalue()
         b64_data = base64.b64encode(file_bytes).decode('utf-8')
         mime_type = uploaded_file.type if hasattr(uploaded_file, 'type') else 'application/octet-stream'
         
-        # 準備傳送給中繼站的資料包裹
         payload = {
             "folderId": DRIVE_FOLDER_ID,
             "fileName": uploaded_file.name,
@@ -36,7 +33,6 @@ def upload_to_drive(uploaded_file):
             "fileBase64": b64_data
         }
         
-        # 發射！把資料丟給你的 Apps Script 分身
         response = requests.post(GAS_WEB_APP_URL, json=payload)
         result = response.json()
         
@@ -170,6 +166,10 @@ st.title("🗺️ 數位旅遊足跡與動線 (API 無限備份版)")
 
 # --- 2. 足跡本地端狀態初始化 ---
 if 'footprint_data' not in st.session_state: st.session_state.footprint_data = []
+
+# 新增：控制地圖中心與縮放，以便從列表點擊連動
+if 'map_center' not in st.session_state: st.session_state.map_center = [35.6895, 139.6917]
+if 'map_zoom' not in st.session_state: st.session_state.map_zoom = 14
 if 'clicked_lat' not in st.session_state: st.session_state.clicked_lat = 35.6895
 if 'clicked_lng' not in st.session_state: st.session_state.clicked_lng = 139.6917
 
@@ -189,11 +189,41 @@ def move_down(idx):
 def delete_pt(idx):
     st.session_state.footprint_data.pop(idx)
 
-# --- 3. 介面佈局 ---
-col_form, col_map = st.columns([1.1, 2])
+# ==========================================
+# 3. 頂部區塊：滿版地圖渲染
+# ==========================================
+st.subheader("🌐 旅遊動線地圖")
+
+m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom, tiles="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps")
+Geocoder(position='topleft', collapsed=False, add_marker=True).add_to(m)
+
+route_coords = [[pt["緯度"], pt["經度"]] for pt in st.session_state.footprint_data]
+
+# 標記所有足跡點
+for pt in st.session_state.footprint_data:
+    folium.Marker([pt["緯度"], pt["經度"]], tooltip=f"{pt['名稱']} ({pt.get('抵達時間','')})").add_to(m)
+
+# 畫出移動軌跡
+if len(route_coords) > 1:
+    folium.PolyLine(route_coords, color="#b87333", weight=4, opacity=0.8).add_to(m)
+    
+map_data = st_folium(m, width="100%", height=450, returned_objects=["last_clicked"])
+
+# 擷取地點供下方新增表單使用
+if map_data and map_data["last_clicked"]:
+    st.session_state.clicked_lat = map_data["last_clicked"]["lat"]
+    st.session_state.clicked_lng = map_data["last_clicked"]["lng"]
+    st.toast(f"📍 已鎖定座標: {st.session_state.clicked_lat:.5f}, {st.session_state.clicked_lng:.5f}")
+
+st.divider()
+
+# ==========================================
+# 4. 中間區塊：新增足跡點表單
+# ==========================================
+col_form, col_info = st.columns([1.5, 1])
 
 with col_form:
-    st.header("📍 新增足跡點")
+    st.header("📍 新增足跡點資料")
     with st.form("footprint_form", clear_on_submit=True):
         pt_name = st.text_input("景點名稱*", placeholder="例如：新倉淺間神社")
         
@@ -235,42 +265,35 @@ with col_form:
                     "描述": pt_desc, "照片": processed_photos
                 }
                 st.session_state.footprint_data.append(new_pt)
+                
+                # 新增完畢自動將地圖定焦到該點
+                st.session_state.map_center = [pt_lat, pt_lng]
+                st.session_state.map_zoom = 15
+                
                 st.success("✅ 記錄與檔案已備份成功！")
                 st.rerun()
-                
-    st.info("💡 提示：地圖搜尋到位置後點擊，座標會自動填入上方。")
 
-with col_map:
-    # --- 地圖渲染 ---
-    if st.session_state.footprint_data:
-        center = [st.session_state.footprint_data[-1]["緯度"], st.session_state.footprint_data[-1]["經度"]]
-    else: center = [st.session_state.clicked_lat, st.session_state.clicked_lng]
-
-    m = folium.Map(location=center, zoom_start=15, tiles="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps")
+with col_info:
+    st.info("""
+    💡 **操作指南**：
+    1. 於上方地圖搜尋目標或點擊想去的座標。
+    2. 左側表單會自動帶入剛剛點擊的經緯度。
+    3. 填寫細節並儲存，地圖將自動串連軌跡！
     
-    Geocoder(position='topleft', collapsed=False, add_marker=True).add_to(m)
-    
-    route_coords = [[pt["緯度"], pt["經度"]] for pt in st.session_state.footprint_data]
-    for pt in st.session_state.footprint_data:
-        folium.Marker([pt["緯度"], pt["經度"]], tooltip=f"{pt['名稱']} ({pt.get('抵達時間','')})").add_to(m)
-    if len(route_coords) > 1:
-        folium.PolyLine(route_coords, color="#b87333", weight=4, opacity=0.8).add_to(m)
-        
-    map_data = st_folium(m, width=1000, height=600, returned_objects=["last_clicked"])
-    
-    if map_data and map_data["last_clicked"]:
-        st.session_state.clicked_lat = map_data["last_clicked"]["lat"]
-        st.session_state.clicked_lng = map_data["last_clicked"]["lng"]
-        st.rerun()
+    👇 **列表連動提示**：
+    點擊下方列表的 `📍` 按鈕，可隨時將上方的地圖對焦回該景點。
+    """)
 
 st.divider()
 
-# --- 4. 旅程足跡管理 ---
+# ==========================================
+# 5. 下方區塊：旅程足跡管理列表
+# ==========================================
 st.subheader("📜 旅程足跡管理")
 if not st.session_state.footprint_data: 
     st.info("尚無足跡資料。")
 else:
-    # 🟢 核心修改：依日期分組足跡，以便進行收合檢視
+    # 依日期分組足跡
     date_groups = {}
     for i, pt in enumerate(st.session_state.footprint_data):
         d_str = pt['日期']
@@ -282,23 +305,27 @@ else:
     for d_str in sorted(date_groups.keys()):
         items = date_groups[d_str]
         
-        # 標題與收合開關
         c_head, c_tgl = st.columns([4, 1])
         with c_head:
             st.markdown(f"<div class='date-header'>📅 {d_str} <span style='font-size:0.8em; color:#888;'>(共 {len(items)} 個足跡)</span></div>", unsafe_allow_html=True)
         with c_tgl:
-            st.write("") # 微調對齊
+            st.write("") 
             is_open = st.toggle("顯示/收合", value=True, key=f"tgl_{d_str}")
 
-        # 若開關為開啟，則顯示該日期的所有足跡
         if is_open:
             for i, pt in items:
-                c_info, c_btns = st.columns([4, 1.2])
+                c_info, c_btns = st.columns([4, 1.5])
                 with c_info:
                     st.markdown(f"""<div class="simple-item"><div><span class="time-tag">🕒 {pt.get('抵達時間','--:--')}</span>
                         <span class="simple-title">{pt['名稱']}</span><span class="simple-meta"> | 停留: {pt.get('停留時間','-')} | {pt.get('類型','其他')}</span></div></div>""", unsafe_allow_html=True)
                 with c_btns:
-                    b1, b2, b3 = st.columns(3)
+                    # 🔴 增加連動地圖定位的按鈕
+                    b_loc, b1, b2, b3 = st.columns(4)
+                    if b_loc.button("📍", key=f"loc_{i}", help="在地圖上查看此景點"):
+                        st.session_state.map_center = [pt["緯度"], pt["經度"]]
+                        st.session_state.map_zoom = 17
+                        st.rerun()
+                        
                     b1.button("⬆️", key=f"u_{i}", on_click=move_up, args=(i,), disabled=(i==0))
                     b2.button("⬇️", key=f"d_{i}", on_click=move_down, args=(i,), disabled=(i==len(st.session_state.footprint_data)-1))
                     b3.button("❌", key=f"x_{i}", on_click=delete_pt, args=(i,))
@@ -349,14 +376,13 @@ else:
                             cols = st.columns(4)
                             for idx, img in enumerate(photos):
                                 with cols[idx % 4]:
-                                    if "id" in img: # Drive 圖片/檔案
+                                    if "id" in img:
                                         if ".pdf" in img['name'].lower():
                                             st.info(f"📄 {img['name']}")
                                         else:
                                             st.image(f"https://drive.google.com/thumbnail?id={img['id']}&sz=w800", use_container_width=True)
                                         st.markdown(f"**[🔗 點擊開啟 / 下載]({img['link']})**")
                                         
-                                    # 兼容舊的暫存資料
                                     elif "data" in img:
                                         st.image(img["data"], use_container_width=True)
                                         
@@ -368,7 +394,6 @@ else:
 
                     # --- Tab 3: 景點花費 (包含修改與刪除) ---
                     with tab_exp:
-                        # 動態從雲端撈取屬於這個景點的消費紀錄來顯示與編輯
                         cloud_df = fetch_cloud_expenses(target_sheet)
                         if not cloud_df.empty and "來源" in cloud_df.columns:
                             pt_expenses = cloud_df[cloud_df["來源"] == f"📍 足跡: {pt['名稱']}"]
@@ -413,7 +438,6 @@ else:
                         
                         st.write("---")
                         
-                        # 新增消費的表單
                         with st.form(key=f"exp_{i}", clear_on_submit=True):
                             st.caption("➕ 新增景點花費")
                             c1, c2 = st.columns([1, 1.5])
