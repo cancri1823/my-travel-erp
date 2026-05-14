@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import base64
 import io
+import re
 from streamlit_gsheets import GSheetsConnection
 
 st.set_page_config(page_title="旅遊清單與準備", page_icon="📝", layout="wide")
@@ -41,9 +42,13 @@ with st.sidebar:
     st.header("🎯 存檔目標")
     st.success(f"目前連線旅程：\n\n**{target_name}**")
     st.caption(f"雲端寫入分頁：`{target_sheet}`")
+    if st.button("🔄 手動從雲端重新整理"):
+        st.session_state.has_synced = False
+        st.cache_data.clear()
+        st.rerun()
     st.divider()
 
-# --- 1. 建立雲端連線與寫入邏輯 ---
+# --- 1. 建立雲端連線與資料邏輯 ---
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
 except Exception as e:
@@ -56,6 +61,139 @@ PLATFORMS = ["Booking", "Agoda", "Klook", "KKday", "Trip", "易遊網", "官方�
 def get_rate(curr):
     rates = {"JPY": st.session_state.get('jpy_rate', 0.215), "CNY": 4.5, "USD": 32.5, "EUR": 35.0, "TWD": 1.0}
     return rates.get(curr, 1.0)
+
+# --- 🟢 核心升級：雲端記憶智慧追加同步機制 (Smart Sync) ---
+def sync_from_cloud():
+    try:
+        df = conn.read(worksheet=target_sheet, ttl=0)
+        if df.empty: return
+        
+        def extract_link(text):
+            m = re.search(r"🔗\s*(https://[^\s]+)", str(text))
+            return m.group(1) if m else None
+
+        def extract_id(text):
+            m = re.search(r"id=([a-zA-Z0-9_-]+)", str(text))
+            return m.group(1) if m else None
+
+        # 1. 同步保險
+        if 'ins_records' not in st.session_state or not st.session_state.ins_records:
+            sub_df = df[df['來源'] == '清單-保險']
+            records = []
+            for _, row in sub_df.iterrows():
+                item = str(row.get('項目', ''))
+                name = item.split("\n")[0].replace("保險：", "").strip()
+                records.append({
+                    "名稱": name, "編號": "雲端同步", "日期": str(row.get('日期','')), 
+                    "金額": row.get('金額', 0), "付款方式": row.get('付款方式',''), "支付人": row.get('支付人',''),
+                    "Drive連結": extract_link(item), "檔案名": "雲端憑證"
+                })
+            if records: st.session_state.ins_records = records
+
+        # 2. 同步交通 (確保起訖點、公司等欄位精準還原)
+        if 'trans_records' not in st.session_state or not st.session_state.trans_records:
+            sub_df = df[df['來源'] == '清單-交通']
+            records = []
+            for _, row in sub_df.iterrows():
+                item = str(row.get('項目', ''))
+                first_line = item.split("\n")[0]
+                # 嘗試解析: 飛機: [公司] 起點➔訖點 (來回)
+                t_type, t_comp, t_st, t_ed = "交通", "雲端同步", first_line, ""
+                m1 = re.search(r"^(.*?):\s*\[(.*?)\]\s*(.*?)➔(.*?)\s*(\(.*\))?$", first_line)
+                if m1:
+                    t_type, t_comp, t_st, t_ed = m1.group(1), m1.group(2), m1.group(3), m1.group(4)
+                else:
+                    t_st = first_line
+
+                records.append({
+                    "種類": t_type, "公司": t_comp, "平台": "", "訂單號": "", "來回": False,
+                    "起點": t_st.strip(), "訖點": t_ed.strip(), "去程班次": "", "回程班次": "",
+                    "金額": row.get('金額',0), "幣別": "TWD", "手續費": 0, "總台幣": row.get('金額',0),
+                    "付款方式": row.get('付款方式',''), "支付人": row.get('支付人',''),
+                    "Drive連結": extract_link(item), "檔案名": "雲端車票"
+                })
+            if records: st.session_state.trans_records = records
+
+        # 3. 同步住宿 (確保飯店名稱精準還原)
+        if 'hotel_records' not in st.session_state or not st.session_state.hotel_records:
+            sub_df = df[df['來源'] == '清單-住宿']
+            records = []
+            for _, row in sub_df.iterrows():
+                item = str(row.get('項目', ''))
+                name = item.split("\n")[0].replace("飯店：", "").strip()
+                records.append({
+                    "飯店": name, "平台": "", "訂單號": "", "入住": str(row.get('日期','')), "晚數": 0,
+                    "金額": row.get('金額',0), "幣別": "TWD", "手續費": 0, "總台幣": row.get('金額',0), "支付人": row.get('支付人',''),
+                    "Drive連結": extract_link(item), "檔案名": "雲端憑證"
+                })
+            if records: st.session_state.hotel_records = records
+
+        # 4. 同步票卷
+        if 'ticket_records' not in st.session_state or not st.session_state.ticket_records:
+            sub_df = df[df['來源'] == '清單-票卷']
+            records = []
+            for _, row in sub_df.iterrows():
+                item = str(row.get('項目', ''))
+                name = item.split("\n")[0].strip()
+                t_type = "票卷"
+                if "：" in name:
+                    t_type, name = name.split("：", 1)
+                records.append({
+                    "種類": t_type.strip(), "名稱": name.strip(), "平台": "", "訂單號": "",
+                    "金額": row.get('金額',0), "幣別": "TWD", "手續費": 0, "總台幣": row.get('金額',0),
+                    "使用日": str(row.get('日期','')), "支付人": row.get('支付人',''),
+                    "Drive連結": extract_link(item), "檔案名": "雲端票卷"
+                })
+            if records: st.session_state.ticket_records = records
+
+        # 5. 同步裝備
+        if 'packing_list' not in st.session_state or not st.session_state.packing_list:
+            sub_df = df[df['來源'] == '清單-裝備']
+            records = []
+            for _, row in sub_df.iterrows():
+                item = str(row.get('項目', ''))
+                first_line = item.split("\n")[0]
+                name = first_line.replace("裝備:", "").strip()
+                m2 = re.search(r"^(.*?)(?:\(\d+個\))?(?:\s*@.*)?$", name)
+                if m2: name = m2.group(1).strip()
+                d_link = extract_link(item)
+                
+                records.append({
+                    "名稱": name, "數量": 1, "商店": "", "位置": "", "狀態": False, "新購": True,
+                    "金額": row.get('金額',0), "幣別": "TWD", "手續費": 0, "總台幣": row.get('金額',0), "支付人": row.get('支付人',''),
+                    "Drive連結": d_link, "DriveID": extract_id(d_link)
+                })
+            if records: st.session_state.packing_list = records
+
+        # 6. 同步伴手禮
+        if 'gift_list' not in st.session_state or not st.session_state.gift_list:
+            sub_df = df[df['來源'] == '清單-伴手禮']
+            records = []
+            for _, row in sub_df.iterrows():
+                item = str(row.get('項目', ''))
+                first_line = item.split("\n")[0]
+                name = first_line.replace("禮物:", "").strip()
+                target = "詳見雲端"
+                m3 = re.search(r"^(.*?)\s*x\d+\s*\((?:給)?(.*?)\)(?:\s*@.*)?$", name)
+                if m3:
+                    name = m3.group(1).strip()
+                    target = m3.group(2).strip()
+                d_link = extract_link(item)
+                
+                records.append({
+                    "名稱": name, "數量": 1, "對象": target, "商店": "", "位置": "",
+                    "金額": row.get('金額',0), "幣別": "TWD", "手續費": 0, "總台幣": row.get('金額',0), "支付人": row.get('支付人',''),
+                    "Drive連結": d_link, "DriveID": extract_id(d_link)
+                })
+            if records: st.session_state.gift_list = records
+
+    except Exception as e:
+        pass # 避免斷線或初期資料庫為空時引發崩潰
+
+# 啟動時自動同步
+if 'has_synced' not in st.session_state:
+    sync_from_cloud()
+    st.session_state.has_synced = True
 
 def save_to_cloud(new_row_dict):
     try:
@@ -140,10 +278,10 @@ with tab_ins:
                 with st.form(key=f"ei_f_{i}"):
                     st.caption("✏️ 修改資料")
                     c_e1, c_e2 = st.columns(2)
-                    e_n = c_e1.text_input("名稱", value=item['名稱'])
-                    e_no = c_e2.text_input("編號", value=item['編號'])
-                    e_a = c_e1.number_input("金額", value=float(item['金額']))
-                    e_py = c_e2.text_input("支付人", value=item['支付人'])
+                    e_n = c_e1.text_input("名稱", value=item.get('名稱',''))
+                    e_no = c_e2.text_input("編號", value=item.get('編號',''))
+                    e_a = c_e1.number_input("金額", value=float(item.get('金額',0)))
+                    e_py = c_e2.text_input("支付人", value=item.get('支付人',''))
                     e_file = st.file_uploader("補傳/更新憑證", type=['pdf', 'jpg', 'png'])
                     if st.form_submit_button("💾 儲存修改"):
                         item['名稱'] = e_n; item['編號'] = e_no; item['金額'] = e_a; item['支付人'] = e_py
@@ -238,11 +376,11 @@ with tab_flight:
         st.subheader("📋 已記錄交通")
         for i, item in enumerate(st.session_state.trans_records):
             rt_display = "🔄 來回" if item.get('來回') else "➡️ 單程"
-            exp_title = f"✈️ {item.get('種類', '交通')}: {item.get('起點','')}➔{item.get('訖點','')} ({rt_display}) - NT$ {item.get('總台幣', 0)}"
+            exp_title = f"✈️ {item.get('起點','')}➔{item.get('訖點','')} - NT$ {item.get('總台幣', 0)}"
             with st.expander(exp_title):
                 if item.get('Drive連結'): st.markdown(f"📎 **[📥 點擊檢視車票憑證]({item['Drive連結']})**")
                 plat_display = f" | 平台: {item.get('平台')}" if item.get('平台') else ""
-                st.write(f"訂單號: {item.get('訂單號','')}{plat_display} | 去程班次: {item.get('去程班次')} | 回程班次: {item.get('回程班次')} | 支付人: {item.get('支付人')}")
+                st.write(f"訂單號: {item.get('訂單號','')}{plat_display} | 支付人: {item.get('支付人')}")
                 
                 if st.button("🗑️ 刪除此紀錄", key=f"et_del_{i}"):
                     st.session_state.trans_records.pop(i); st.rerun()
@@ -329,10 +467,10 @@ with tab_hotel:
         st.divider()
         st.subheader("📋 已記錄住宿")
         for i, item in enumerate(st.session_state.hotel_records):
-            with st.expander(f"🏨 {item['飯店']} ({item['晚數']}晚) - NT$ {item.get('總台幣',0)}"):
+            with st.expander(f"🏨 {item.get('飯店')} - NT$ {item.get('總台幣',0)}"):
                 if item.get('Drive連結'): st.markdown(f"📎 **[📥 點擊檢視訂房憑證]({item['Drive連結']})**")
                 plat_display = f" | 平台: {item.get('平台')}" if item.get('平台') else ""
-                st.write(f"入住：{item['入住']} | 訂單號: {item.get('訂單號','')}{plat_display} | 支付人：{item.get('支付人')}")
+                st.write(f"入住：{item.get('入住')} | 訂單號: {item.get('訂單號','')}{plat_display} | 支付人：{item.get('支付人')}")
                 
                 if st.button("🗑️ 刪除此紀錄", key=f"eh_del_{i}"): st.session_state.hotel_records.pop(i); st.rerun()
                 
@@ -409,10 +547,10 @@ with tab_ticket:
         st.divider()
         st.subheader("📋 已記錄票卷")
         for i, item in enumerate(st.session_state.ticket_records):
-            with st.expander(f"🎟️ [{item['種類']}] {item['名稱']} - NT$ {item.get('總台幣',0)}"):
+            with st.expander(f"🎟️ [{item.get('種類', '票卷')}] {item.get('名稱')} - NT$ {item.get('總台幣',0)}"):
                 if item.get('Drive連結'): st.markdown(f"📎 **[📥 點擊檢視票卷檔案]({item['Drive連結']})**")
                 plat_display = f" | 平台: {item.get('平台')}" if item.get('平台') else ""
-                st.write(f"使用日：{item['使用日']} | 訂單號: {item.get('訂單號','')}{plat_display} | 支付人：{item.get('支付人')}")
+                st.write(f"使用日：{item.get('使用日')} | 訂單號: {item.get('訂單號','')}{plat_display} | 支付人：{item.get('支付人')}")
                 if st.button("🗑️ 刪除此紀錄", key=f"etk_del_{i}"): st.session_state.ticket_records.pop(i); st.rerun()
                 
                 with st.form(key=f"etk_f_{i}"):
@@ -499,7 +637,7 @@ with tab_cash:
                         st.rerun()
 
 # ==========================================
-# 6. 行李裝備 
+# 6. 行李裝備 (🟢 加入三欄式縮圖預覽)
 # ==========================================
 with tab_pack:
     st.header("🎒 裝備清單")
@@ -560,53 +698,60 @@ with tab_pack:
         st.progress(checked_count / len(st.session_state.packing_list) if len(st.session_state.packing_list) > 0 else 0)
         
         for i, item in enumerate(st.session_state.packing_list):
-            c_chk, c_exp = st.columns([0.1, 0.9])
-            checked = c_chk.checkbox("", value=item.get('狀態', False), key=f"pk_chk_{i}")
-            if checked != item.get('狀態', False):
-                st.session_state.packing_list[i]['狀態'] = checked; st.rerun()
+            c_chk, c_img, c_exp = st.columns([0.05, 0.15, 0.8])
             
-            new_tag = f" 🆕 (NT$ {item.get('總台幣',0)})" if item.get('新購', False) else ""
-            with c_exp.expander(f"🎒 {item['名稱']} x {item.get('數量', 1)}{new_tag}"):
-                if item.get('DriveID'):
-                    if ".pdf" in item.get('Drive連結', '').lower():
-                        st.markdown(f"📎 **[📥 檢視 PDF 憑證]({item['Drive連結']})**")
-                    else:
-                        st.image(f"https://drive.google.com/thumbnail?id={item['DriveID']}&sz=w800", width=200)
-                        st.markdown(f"**[📥 下載大圖]({item['Drive連結']})**")
-                
-                store_disp = f" | 商店: {item.get('商店')}" if item.get('商店') else ""
-                loc_disp = f" | 位置: {item.get('位置')}" if item.get('位置') else ""
-                st.write(f"支付人：{item.get('支付人', '未知')}{store_disp}{loc_disp}")
-                
-                if st.button("🗑️ 刪除此紀錄", key=f"epk_del_{i}"): st.session_state.packing_list.pop(i); st.rerun()
-                
-                with st.form(key=f"epk_f_{i}"):
-                    st.caption("✏️ 修改資料")
-                    e_n = st.text_input("名稱", value=item.get('名稱',''))
-                    e_q = st.number_input("數量", value=item.get('數量',1), min_value=1)
+            with c_chk:
+                checked = st.checkbox("", value=item.get('狀態', False), key=f"pk_chk_{i}")
+                if checked != item.get('狀態', False):
+                    st.session_state.packing_list[i]['狀態'] = checked; st.rerun()
+            
+            with c_img:
+                if item.get('DriveID') and not (".pdf" in str(item.get('Drive連結', '')).lower()):
+                    st.image(f"https://drive.google.com/thumbnail?id={item['DriveID']}&sz=200", use_container_width=True)
+
+            with c_exp:
+                new_tag = f" 🆕 (NT$ {item.get('總台幣',0)})" if item.get('新購', False) else ""
+                with st.expander(f"🎒 {item.get('名稱')} x {item.get('數量', 1)}{new_tag}"):
+                    if item.get('DriveID'):
+                        if ".pdf" in item.get('Drive連結', '').lower():
+                            st.markdown(f"📎 **[📥 檢視 PDF 憑證]({item['Drive連結']})**")
+                        else:
+                            st.image(f"https://drive.google.com/thumbnail?id={item['DriveID']}&sz=w800", width=200)
+                            st.markdown(f"**[📥 下載大圖]({item['Drive連結']})**")
                     
-                    e_s1, e_s2 = st.columns(2)
-                    e_store = e_s1.text_input("購買商店", value=item.get('商店',''))
-                    e_loc = e_s2.text_input("商店位置", value=item.get('位置',''))
+                    store_disp = f" | 商店: {item.get('商店')}" if item.get('商店') else ""
+                    loc_disp = f" | 位置: {item.get('位置')}" if item.get('位置') else ""
+                    st.write(f"支付人：{item.get('支付人', '未知')}{store_disp}{loc_disp}")
                     
-                    e_a1, e_a2, e_a3 = st.columns(3)
-                    e_amt = e_a1.number_input("原幣金額", value=float(item.get('金額',0)))
-                    e_curr = e_a2.text_input("幣別", value=item.get('幣別','TWD'))
-                    e_fee = e_a3.number_input("國外處理費", value=float(item.get('手續費',0.0)))
+                    if st.button("🗑️ 刪除此紀錄", key=f"epk_del_{i}"): st.session_state.packing_list.pop(i); st.rerun()
                     
-                    e_payer = st.text_input("支付人", value=item.get('支付人','自己'))
-                    e_file = st.file_uploader("補傳/更新檔案", type=['jpg', 'png', 'jpeg', 'pdf'])
-                    
-                    if st.form_submit_button("💾 儲存修改"):
-                        item.update({'名稱': e_n, '數量': e_q, '商店': e_store, '位置': e_loc, '金額': e_amt, '幣別': e_curr, '手續費': e_fee, '支付人': e_payer})
-                        if item.get('新購'): item['總台幣'] = int(e_amt * get_rate(e_curr)) + int(e_fee)
-                        if e_file:
-                            d = upload_to_drive(e_file)
-                            if d: item['Drive連結'] = d['link']; item['DriveID'] = d['id']
-                        st.rerun()
+                    with st.form(key=f"epk_f_{i}"):
+                        st.caption("✏️ 修改資料")
+                        e_n = st.text_input("名稱", value=item.get('名稱',''))
+                        e_q = st.number_input("數量", value=item.get('數量',1), min_value=1)
+                        
+                        e_s1, e_s2 = st.columns(2)
+                        e_store = e_s1.text_input("購買商店", value=item.get('商店',''))
+                        e_loc = e_s2.text_input("商店位置", value=item.get('位置',''))
+                        
+                        e_a1, e_a2, e_a3 = st.columns(3)
+                        e_amt = e_a1.number_input("原幣金額", value=float(item.get('金額',0)))
+                        e_curr = e_a2.text_input("幣別", value=item.get('幣別','TWD'))
+                        e_fee = e_a3.number_input("國外處理費", value=float(item.get('手續費',0.0)))
+                        
+                        e_payer = st.text_input("支付人", value=item.get('支付人','自己'))
+                        e_file = st.file_uploader("補傳/更新檔案", type=['jpg', 'png', 'jpeg', 'pdf'])
+                        
+                        if st.form_submit_button("💾 儲存修改"):
+                            item.update({'名稱': e_n, '數量': e_q, '商店': e_store, '位置': e_loc, '金額': e_amt, '幣別': e_curr, '手續費': e_fee, '支付人': e_payer})
+                            if item.get('新購'): item['總台幣'] = int(e_amt * get_rate(e_curr)) + int(e_fee)
+                            if e_file:
+                                d = upload_to_drive(e_file)
+                                if d: item['Drive連結'] = d['link']; item['DriveID'] = d['id']
+                            st.rerun()
 
 # ==========================================
-# 7. 伴手禮清單 
+# 7. 伴手禮清單 (🟢 加入預覽圖)
 # ==========================================
 with tab_gift:
     st.header("🎁 伴手禮採購")
@@ -662,41 +807,48 @@ with tab_gift:
         st.divider()
         st.subheader("📋 已記錄伴手禮")
         for i, item in enumerate(st.session_state.gift_list):
-            with st.expander(f"🎁 {item['名稱']} x {item.get('數量', 1)} (給 {item['對象']}) - NT$ {item.get('總台幣',0)}"):
-                if item.get('DriveID'):
-                    if ".pdf" in item.get('Drive連結', '').lower():
-                        st.markdown(f"📎 **[📥 檢視 PDF 收據]({item['Drive連結']})**")
-                    else:
-                        st.image(f"https://drive.google.com/thumbnail?id={item['DriveID']}&sz=w800", width=200)
-                        st.markdown(f"**[📥 下載照片]({item['Drive連結']})**")
-                
-                store_disp = f" | 商店: {item.get('商店')}" if item.get('商店') else ""
-                loc_disp = f" | 位置: {item.get('位置')}" if item.get('位置') else ""
-                st.write(f"支付人：{item.get('支付人', '未知')}{store_disp}{loc_disp}")    
-                
-                if st.button("🗑️ 刪除此紀錄", key=f"egf_del_{i}"): st.session_state.gift_list.pop(i); st.rerun()
-                
-                with st.form(key=f"egf_f_{i}"):
-                    st.caption("✏️ 修改資料")
-                    e_n = st.text_input("名稱", value=item.get('名稱',''))
-                    e_q = st.number_input("數量", value=item.get('數量',1), min_value=1)
-                    e_t = st.text_input("對象", value=item.get('對象',''))
+            
+            c_img, c_exp = st.columns([0.15, 0.85])
+            with c_img:
+                if item.get('DriveID') and not (".pdf" in str(item.get('Drive連結', '')).lower()):
+                    st.image(f"https://drive.google.com/thumbnail?id={item['DriveID']}&sz=200", use_container_width=True)
+
+            with c_exp:
+                with st.expander(f"🎁 {item.get('名稱')} x {item.get('數量', 1)} (給 {item.get('對象')}) - NT$ {item.get('總台幣',0)}"):
+                    if item.get('DriveID'):
+                        if ".pdf" in item.get('Drive連結', '').lower():
+                            st.markdown(f"📎 **[📥 檢視 PDF 收據]({item['Drive連結']})**")
+                        else:
+                            st.image(f"https://drive.google.com/thumbnail?id={item['DriveID']}&sz=w800", width=200)
+                            st.markdown(f"**[📥 下載照片]({item['Drive連結']})**")
                     
-                    e_s1, e_s2 = st.columns(2)
-                    e_store = e_s1.text_input("購買商店", value=item.get('商店',''))
-                    e_loc = e_s2.text_input("商店位置", value=item.get('位置',''))
+                    store_disp = f" | 商店: {item.get('商店')}" if item.get('商店') else ""
+                    loc_disp = f" | 位置: {item.get('位置')}" if item.get('位置') else ""
+                    st.write(f"支付人：{item.get('支付人', '未知')}{store_disp}{loc_disp}")    
                     
-                    e_a1, e_a2, e_a3 = st.columns(3)
-                    e_amt = e_a1.number_input("原幣金額", value=float(item.get('金額',0.0)))
-                    e_curr = e_a2.text_input("幣別", value=item.get('幣別','TWD'))
-                    e_fee = e_a3.number_input("國外處理費", value=float(item.get('手續費', 0.0)))
-                    e_payer = st.text_input("支付人", value=item.get('支付人','自己'))
+                    if st.button("🗑️ 刪除此紀錄", key=f"egf_del_{i}"): st.session_state.gift_list.pop(i); st.rerun()
                     
-                    e_file = st.file_uploader("補傳/更新檔案", type=['jpg', 'png', 'jpeg', 'pdf'])
-                    if st.form_submit_button("💾 儲存修改"):
-                        item.update({'名稱': e_n, '數量': e_q, '對象': e_t, '商店': e_store, '位置': e_loc, '金額': e_amt, '幣別': e_curr, '手續費': e_fee, '支付人': e_payer})
-                        item['總台幣'] = int(e_amt * get_rate(e_curr)) + int(e_fee)
-                        if e_file:
-                            d = upload_to_drive(e_file)
-                            if d: item['Drive連結'] = d['link']; item['DriveID'] = d['id']
-                        st.rerun()
+                    with st.form(key=f"egf_f_{i}"):
+                        st.caption("✏️ 修改資料")
+                        e_n = st.text_input("名稱", value=item.get('名稱',''))
+                        e_q = st.number_input("數量", value=item.get('數量',1), min_value=1)
+                        e_t = st.text_input("對象", value=item.get('對象',''))
+                        
+                        e_s1, e_s2 = st.columns(2)
+                        e_store = e_s1.text_input("購買商店", value=item.get('商店',''))
+                        e_loc = e_s2.text_input("商店位置", value=item.get('位置',''))
+                        
+                        e_a1, e_a2, e_a3 = st.columns(3)
+                        e_amt = e_a1.number_input("原幣金額", value=float(item.get('金額',0.0)))
+                        e_curr = e_a2.text_input("幣別", value=item.get('幣別','TWD'))
+                        e_fee = e_a3.number_input("國外處理費", value=float(item.get('手續費', 0.0)))
+                        e_payer = st.text_input("支付人", value=item.get('支付人','自己'))
+                        
+                        e_file = st.file_uploader("補傳/更新檔案", type=['jpg', 'png', 'jpeg', 'pdf'])
+                        if st.form_submit_button("💾 儲存修改"):
+                            item.update({'名稱': e_n, '數量': e_q, '對象': e_t, '商店': e_store, '位置': e_loc, '金額': e_amt, '幣別': e_curr, '手續費': e_fee, '支付人': e_payer})
+                            item['總台幣'] = int(e_amt * get_rate(e_curr)) + int(e_fee)
+                            if e_file:
+                                d = upload_to_drive(e_file)
+                                if d: item['Drive連結'] = d['link']; item['DriveID'] = d['id']
+                            st.rerun()
